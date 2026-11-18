@@ -1,0 +1,92 @@
+name: Build Vega Tape
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows VST3
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A x64 -DVEGA_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target VegaTape_VST3 VegaOfflineTest --parallel
+
+      - name: DSP self-test (stability, harmonics, bypass)
+        run: build\VegaOfflineTest_artefacts\Release\VegaOfflineTest.exe
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: VegaTape-Windows-VST3
+          path: build/VegaTape_artefacts/Release/VST3/
+
+  macos:
+    name: macOS VST3 + AU (Universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DVEGA_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target VegaTape_VST3 VegaTape_AU VegaOfflineTest --parallel
+
+      - name: DSP self-test
+        run: ./build/VegaOfflineTest_artefacts/Release/VegaOfflineTest
+
+      - name: Ad-hoc sign
+        run: |
+          codesign --force --deep -s - "build/VegaTape_artefacts/Release/VST3/Vega Productions Tape.vst3"
+          codesign --force --deep -s - "build/VegaTape_artefacts/Release/AU/Vega Productions Tape.component"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp -R "build/VegaTape_artefacts/Release/VST3/Vega Productions Tape.vst3" dist/
+          cp -R "build/VegaTape_artefacts/Release/AU/Vega Productions Tape.component" dist/
+          cd dist && zip -r -y ../VegaTape-macOS.zip .
+
+      - name: Upload macOS plugins
+        uses: actions/upload-artifact@v4
+        with:
+          name: VegaTape-macOS-VST3-AU
+          path: VegaTape-macOS.zip
+
+  release:
+    name: Publish release
+    needs: [windows, macos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Zip each plugin
+        run: |
+          cd dist
+          for d in */; do
+            d="${d%/}"
+            inner=$(ls "$d"/*.zip 2>/dev/null | head -1)
+            if [ -n "$inner" ] && [ "$(ls -A "$d" | wc -l)" -eq 1 ]; then mv "$inner" "$d.zip"; else (cd "$d" && zip -r -y "../$d.zip" .); fi
+          done
+          ls -la *.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Vega Productions - build ${{ github.run_number }}
+          make_latest: true
+          body: |
+            Download the **Windows-VST3** zip for FL Studio on Windows, or the **macOS-VST3-AU** zip for your Mac.
+            Unzip, then copy the `.vst3` to `C:\Program Files\Common Files\VST3\` (Windows) or `~/Library/Audio/Plug-Ins/VST3/` (Mac).
+          files: dist/*.zip
